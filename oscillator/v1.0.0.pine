@@ -1,0 +1,127 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © boitoki
+
+//@version=5
+indicator("Flex Heikin-Ashi oscillator", "FHA osc", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+import boitoki/AwesomeColor/8 as ac
+import boitoki/Heikinashi/5 as heikinashi
+import boitoki/ma_function/4 as ma
+
+///////////////
+// Functions //
+f_pipfy (_v) => _v / (syminfo.mintick * 10)
+
+f_pricefy (_v) => _v * (syminfo.mintick * 10)
+
+f_clear_lines (_arr) =>
+    if (array.size(_arr) > 0)
+        for i = 1 to array.size(_arr)
+            line.delete(array.shift(_arr))
+
+f_color (_package, _color, _costomColor = color.gray) =>
+    switch _package
+        'black'         => ac.panda('black')
+        'Gameboy'       => color.from_gradient(50, 0, 100, #1e2e0c, ac.panda('black'))
+        'Custom'        => _costomColor
+        => ac.package(_package, _color)
+
+////////////
+// Inputs //
+i_show_overlay              = input.bool(true, 'Overlay')
+i_averaged_times            = input.int(3, 'Averagd times', minval=1, maxval=10, group="General")
+i_show_ov                   = input.bool(true, 'Oscillator', group='Overlay')
+i_ov_width                  = input.int(100, 'Lookback', minval=0, maxval=200, group='Overlay')
+i_ov_ma                     = input.string('EMA', 'Smoothed by', options=['ALMA', 'AMA', 'DEMA', 'EMA', 'HMA', 'KAMA', 'LSMA', 'MAV', 'RMA', 'SMA', 'SWMA', 'TEMA', 'TMA', 'VWMA', 'WMA', 'ZLEMA'], group='Overlay')
+i_ov_ma_period              = input.int(3, 'Smoothing', minval=1, group='Overlay')
+i_osc_thickness             = input.int(3, 'Thickness', group='Overlay')
+
+i_color                     = input.string('TradingView', '🎨 ', options=['TradingView', 'monokai', 'monokaipro', 'panda', 'Gruvbox', 'Spacemacs_light', 'Spacemacs_dark', 'Guardians', 'st3', 'st4', 'Gameboy', 'black', 'Custom'], group='options', inline='color')
+i_color_1                   = input.color(color.green, '|', group='options', inline='color', tooltip='Bull color')
+i_color_2                   = input.color(color.red, '', group='options', inline='color', tooltip='Bear color')
+i_color_3                   = input.color(color.new(#1e2e0c, 30), '', group='options', inline='color')
+
+color_bull                  = f_color(i_color, 'green', i_color_1)
+color_bear                  = f_color(i_color, 'red', i_color_2)
+color_line                  = i_color_3
+color_none                  = color.new(color.black, 100)
+
+//////////
+// Calc //
+[hopen, _, _, hclose]       = heikinashi.calcFor(open, high, low, close, 'oc2', i_averaged_times)
+oc_pips                     = f_pipfy(math.abs(hopen - hclose))
+
+// overlay value
+ov_high                     = ta.sma(math.max(hopen, hclose, high), 2)
+ov_low                      = ta.sma(math.min(hopen, hclose, low), 2)
+ov_top                      = math.max(hopen, hclose)
+ov_bot                      = math.min(hopen, hclose)
+osc                         = ma.calc(i_ov_ma, (ov_high - ov_top) - (ov_bot - ov_low), i_ov_ma_period)
+
+cond_buy                    = osc > 0 and osc[1] < 0
+cond_sell                   = osc < 0 and osc[1] > 0
+
+// overlay scale
+verticalAdj                 = 0.8
+priceHighest                = ta.highest(high, i_ov_width)
+priceLowest                 = ta.lowest (low , i_ov_width)
+priceChangeRate             = (priceHighest - priceLowest) / priceHighest
+oscTop                      = priceLowest * (1 - priceChangeRate * (1 - verticalAdj))
+oscBottom                   = priceLowest * (1 - priceChangeRate * verticalAdj)
+oscCenter                   = math.avg(oscTop, oscBottom)
+oscHeight                   = oscTop - oscBottom
+oscHighest                  = ta.highest(math.abs(osc), i_ov_width)
+
+var a_line = array.new<line>()
+var a_hist = array.new<line>()
+
+if barstate.islast and i_show_ov
+    ov_x1 = bar_index - 1
+    ov_x2 = bar_index - i_ov_width - 2
+    ov_x3 = ov_x1 + 2
+    hightAdj = ((oscHeight * 0.5) / (oscHighest))
+
+    f_clear_lines(a_line)
+    f_clear_lines(a_hist)
+
+    array.push(a_line, line.new(ov_x1, oscTop    , ov_x2, oscTop    ,  width=1, color=color_line, style=line.style_dashed))
+    array.push(a_line, line.new(ov_x1, oscBottom , ov_x2, oscBottom ,  width=1, color=color_line, style=line.style_dashed))
+    array.push(a_line, line.new(ov_x3, oscCenter , ov_x2, oscCenter ,  width=1, color=color_line, style=line.style_dotted))
+
+    for i = 0 to i_ov_width
+        x = bar_index - i
+        y = oscCenter + (osc[i] * hightAdj)
+        color_hist = osc[i] > 0 ? color_bull : color_bear
+        array.push(a_hist, line.new(x, oscCenter, x, y, width=i_osc_thickness, color=color_hist) )
+
+//////////////
+// Triggers //
+i_show_triggers             = input.bool(true, 'Triggers')
+
+margin_top                  = math.round(ta.stdev(oc_pips, 500) / 1)
+margin_top2                 = math.round(ta.stdev(oc_pips, 500) / 4)
+p_top                       = math.max(hopen, hclose, high) + f_pricefy(margin_top)
+p_top2                      = p_top + f_pricefy(margin_top2)
+p_btm                       = math.min(hopen, hclose, low)  - f_pricefy(margin_top)
+p_btm2                      = p_btm - f_pricefy(margin_top2)
+
+c_buy                       = color_bull
+c_sell                      = color_bear
+
+plotshape(i_show_triggers and cond_buy ? p_btm : na, 'Buy', text='', textcolor=ac.panda('white'), color=c_buy, style=shape.labelup, location=location.absolute, size=size.tiny)
+plotshape(i_show_triggers and cond_sell ? p_top : na, 'Sell', text='', textcolor=ac.panda('white'), color=c_sell, style=shape.labeldown, location=location.absolute, size=size.tiny)
+
+if i_show_triggers
+    if cond_buy
+        label.new(bar_index, p_btm2, 'T', yloc=yloc.price, size=size.small, color=color_none, textcolor=c_buy, style=label.style_label_up, tooltip=str.tostring(high))
+
+    if cond_sell
+        label.new(bar_index, p_top2, 'T', yloc=yloc.price, size=size.small, color=color_none, textcolor=c_sell, style=label.style_label_down, tooltip=str.tostring(low))
+
+////////////
+// Alerts //
+if cond_buy
+    alert(syminfo.ticker + ': Long', alert.freq_once_per_bar_close)
+
+if cond_sell
+    alert(syminfo.ticker + ': Short', alert.freq_once_per_bar_close)
