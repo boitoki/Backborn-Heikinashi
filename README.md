@@ -1,1 +1,1 @@
-# Nikomi Heikinashi
+# 煮込み平均足
