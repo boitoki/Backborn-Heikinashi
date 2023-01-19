@@ -1,1 +1,1 @@
-# Flex Heikin-Ashi
+# Nikomi Heikinashi
