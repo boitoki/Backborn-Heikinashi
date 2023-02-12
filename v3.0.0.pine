@@ -1,0 +1,257 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © boitoki
+
+//@version=5
+indicator("Cloak & Dagger Heikin-ashi", "CD_Heikinashi", overlay=true, max_labels_count=500, max_lines_count=500)
+
+import boitoki/AwesomeColor/8 as ac
+import boitoki/Heikinashi/6 as heikinashi
+import boitoki/ma_function/4 as ma
+import boitoki/Utilities/2 as util
+
+///////////////
+// Functions //
+f_get_trading_dir (_buy, _sell, _dir) => _buy ? 1 : _sell ? -1 : _dir
+
+f_color (_package, _color, _costomColor = color.gray) =>
+    switch _package
+        'Custom'        => _costomColor
+        => ac.package(_package, _color)
+
+f_elapsed_time (_break) =>
+    var open_time = 0
+
+    if _break
+        open_time := time 
+    
+    time - open_time
+
+f_cp_doji (_p = 0.01) => math.abs(open - close) <= (high - low) * _p
+
+f_cp_insidebar (_t = 1) =>  t = math.max(_t, 1), high[t-1] < high[t] and low[t-1] > low[t]
+
+f_get_trigger_count (_break, _buy, _sell) =>
+    var count = 0
+
+    if _break
+        count := 0
+    
+    if _buy or _sell
+        count := count + 1
+
+    count
+
+f_get_bartype (_o, _h, _l, _c, _is_insidebar, _is_tinybar) =>
+    is_positive_bar = _c >= _o
+
+    bt = is_positive_bar ? 1 : -1
+    btt = bt
+
+    if (_is_insidebar or _is_tinybar)
+        bt := bt[1]
+        btt := btt[1]
+
+    ////////////////////
+    // Change bar, but ..
+    if bt == 1 and bt[1] == -1 and _c < math.avg(_o[1], _o[2])
+        bt := -1
+    
+    if bt == -1 and bt[1] == 1 and _c > math.avg(_o[1], _o[2])
+        bt := 1
+
+    if bt == -1 and bt[1] == 1 and close > math.avg(_h, _l)
+        bt := 1
+
+    if bt == 1 and bt[1] == -1 and close < math.avg(_h, _l)
+        bt := -1
+    
+    t = math.max(_o, _c)
+    b = math.min(_o, _c)
+
+    // Close is between hopen and hclose.
+    if ((bt == 1 and bt[1] == -1) or (bt == -1 and bt[1] == 1)) and (close < t and close > b)
+        //label.new(bar_index, na, 'aaaaa', yloc=yloc.abovebar, color=color.yellow)
+        bt := bt[1]
+        btt := btt[1]
+
+    [bt, btt]
+
+
+////////////
+// Inputs //
+note_mode = 'Mode 1: Trend catch\n'
+  + 'Mode 2: Acro\n'
+  + 'Mode 3: Acro smoothed\n'
+  + 'Mode 4: Meltdown (Veri lazi smoothed)'
+
+i_type                      = input.string('Heikin-Ashi', 'Display', options=['Heikin-Ashi', 'Candles', 'Barcolor', 'None'], group='General')
+i_show_candle               = i_type == 'Candles'
+i_show_heikinashi           = i_type == 'Heikin-Ashi'
+i_mode                      = input.string('Mode 1', 'Mode', options=['Mode 1', 'Mode 2', 'Mode 3', 'Mode 4', 'Custom'], group='General', tooltip=note_mode)
+i_candle_close              = input.string('None', 'Actual Close level', options=['Always', 'Signal only', 'None'], group="General")
+i_averaged_times            = input.int(1, 'Averaged by (times)', minval=1, maxval=10, group="Custom")
+i_close_type                = input.string('ohlc4', 'Close calculated by', options=['ohlc4', 'ohlc4-s2', 'ohlc4-s3', 'ohlc4-s4', 'hlc3', 'oc2', 'hl2', 'close'], group="Custom")
+
+i_show_triggers             = input.bool(true, "Flip (", group='Trigger', inline='trigger')
+i_show_trigger_count        = input.bool(true, "counts )", group='Trigger', inline='trigger') and i_show_triggers
+//i_show_trigger_pyramiding   = input.bool(false, "Pyramiding", group='Trigger') and i_show_triggers
+i_show_trigger_count_br     = util.auto_htf()
+
+i_ma1_displayed             = input.bool(false, 'MA1', inline='ma1', group='MA')
+i_ma1_period                = input.int(30, '', minval=1, inline='ma1', group='MA')
+i_ma1_type                  = input.string('EMA', '', options=['ALMA', 'AMA', 'DEMA', 'EMA', 'HMA', 'KAMA', 'LSMA', 'MAV', 'RMA', 'SMA', 'SWMA', 'TEMA', 'TMA', 'VWMA', 'WMA', 'ZLEMA'], inline='ma1', group='MA')
+i_ma2_displayed             = input.bool(false, 'MA2', inline='ma2', group='MA')
+i_ma2_period                = input.int(200, '', minval=1, inline='ma2', group='MA')
+i_ma2_type                  = input.string('EMA', '', options=['ALMA', 'AMA', 'DEMA', 'EMA', 'HMA', 'KAMA', 'LSMA', 'MAV', 'RMA', 'SMA', 'SWMA', 'TEMA', 'TMA', 'VWMA', 'WMA', 'ZLEMA'], inline='ma2', group='MA')
+
+i_color                     = input.string('TradingView', '🎨 ', options=['TradingView', 'monokai', 'monokaipro', 'panda', 'Gruvbox', 'Spacemacs_light', 'Spacemacs_dark', 'Guardians', 'st3', 'st4', 'Custom'], group='options', inline='color')
+i_color_1                   = input.color(color.green, '|', group='options', inline='color')
+i_color_2                   = input.color(color.red, '', group='options', inline='color')
+i_color_3                   = input.color(color.aqua, '', group='options', inline='color')
+i_color_4                   = input.color(color.green, '|', group='options', inline='color')
+i_color_5                   = input.color(color.red, '', group='options', inline='color')
+i_hollow                    = input.bool(true, 'Hollow candle', group='options')
+i_show_info_table           = input.bool(false, 'Information', group='Development')
+i_show_barcolor             = i_type == 'Barcolor'
+
+// Setting param by mode
+if i_mode == 'Mode 1'
+    i_averaged_times := 3
+    i_close_type := 'oc2'
+else if i_mode == 'Mode 2'
+    i_averaged_times := 10
+    i_close_type := 'ohlc4'
+else if i_mode == 'Mode 3'
+    i_averaged_times := 2
+    i_close_type := 'ohlc4-s3'
+else if i_mode == 'Mode 4'
+    i_averaged_times := 5
+    i_close_type := 'ohlc4-s4'
+
+//////////
+// Calc //
+htf_changed                 = ta.change(time(i_show_trigger_count_br))
+
+elapsed_time                = f_elapsed_time(htf_changed)
+
+[hopen, _, _, hclose]       = heikinashi.calcFor(open, high, low, close, i_close_type, i_averaged_times)
+
+ma1                         = ma.calc(i_ma1_type, math.avg(hopen, hclose), i_ma1_period)
+ma2                         = ma.calc(i_ma2_type, math.avg(hopen, hclose), i_ma2_period)
+
+hl_pips                     = util.toPips(math.abs(high - low))
+oc_pips                     = util.toPips(math.abs(hopen - hclose))
+
+// Conditions
+is_insidebar                = f_cp_insidebar()
+is_doji                     = f_cp_doji(0.02)
+is_tinybar                  = oc_pips < math.round(ta.stdev(oc_pips, 100) / 3) // 15min: 3pips
+is_largebar                 = hl_pips > math.round(ta.stdev(hl_pips, 100) * 3) // 15min: 30pips
+[bar_type, bar_type_true]   = f_get_bartype(hopen, high, low, hclose, is_insidebar, is_tinybar)
+
+// Triggers
+cond_buy                    = ta.change(bar_type) > 0 and (not is_tinybar) //and (not is_largebar)
+cond_buy2                   = is_doji and bar_type == 1
+cond_sell                   = ta.change(bar_type) < 0 and (not is_tinybar) //and (not is_largebar)
+cond_sell2                  = is_doji and bar_type == -1
+
+var trading_dir             = 0, trading_dir := f_get_trading_dir(cond_buy, cond_sell, trading_dir[1])
+
+/////////////////
+// Plot colors //
+color_bull                  = f_color(i_color, 'green', i_color_1)
+color_bear                  = f_color(i_color, 'red', i_color_2)
+color_ma                    = f_color(i_color, 'blue', i_color_3)
+color_none                  = color.new(color.black, 100)
+c_bar                       = bar_type == 1 ? color_bull : color_bear
+c_border                    = c_bar
+c_body                      = c_bar
+c_close                     = i_show_heikinashi and i_candle_close == 'Always' ? c_bar : color_none
+
+if i_show_heikinashi and i_candle_close == 'Signal only'
+    c_close                := (cond_buy or cond_sell) or (cond_buy2 or cond_sell2) ? c_bar : color_none
+
+if i_show_heikinashi and i_candle_close == 'None'
+    c_close                := color_none
+
+if i_hollow and bar_type == 1
+    c_body                 := color_none
+
+//////////
+// Plot //
+candle_open                 = 0.0
+candle_close                = 0.0
+
+if i_show_heikinashi
+    candle_open            := hopen
+    candle_close           := hclose
+else if i_show_candle
+    candle_open            := open
+    candle_close           := close
+else 
+    candle_open            := na
+    candle_close           := na
+
+plotcandle(candle_open, high, low, candle_close, 'Heikin-ashi', color=c_body, wickcolor=c_border, bordercolor=c_border)
+plotcandle(close, close, close, close, 'Close level', color=color_none, wickcolor=color_none, bordercolor=c_close)
+
+plot(i_ma1_displayed ? ma1 : na, 'MA1', color=color_ma, linewidth=1)
+plot(i_ma2_displayed ? ma2 : na, 'MA2', color=color_ma, linewidth=1, style=plot.style_circles)
+
+// Bar colors
+c_barcolor = i_show_barcolor ? c_body : na
+barcolor(c_barcolor)
+
+//////////////
+// Triggers //
+c_buy                       = f_color(i_color, 'green', i_color_4)
+c_sell                      = f_color(i_color, 'red', i_color_5)
+c_none                      = color.new(color.black, 100)
+margin_top                  = math.round(ta.stdev(oc_pips, 500) / 2)
+margin_top2                 = math.round(ta.stdev(oc_pips, 500) / 0.5)
+p_top                       = math.max(hopen, hclose, high) + util.toPrice(margin_top)
+p_btm                       = math.min(hopen, hclose, low)  - util.toPrice(margin_top)
+
+icon_bull = '🐂'
+icon_bear = '🐻'
+
+plotshape(i_show_triggers and cond_buy ? p_btm : na, 'Buy', text='', textcolor=ac.panda('white'), color=c_buy, style=shape.labelup, location=location.absolute, size=size.tiny)
+plotshape(i_show_triggers and cond_sell ? p_top : na, 'Sell', text='', textcolor=ac.panda('white'), color=c_sell, style=shape.labeldown, location=location.absolute, size=size.tiny)
+
+// plotshape(i_show_triggers and cond_buy2 ? p_btm : na, 'Buy', text='', textcolor=ac.panda('white'), color=c_buy, style=shape.labelup, location=location.absolute, size=size.tiny)
+// plotshape(i_show_triggers and cond_sell2 ? p_top : na, 'Sell', text='', textcolor=ac.panda('white'), color=c_sell, style=shape.labeldown, location=location.absolute, size=size.tiny)
+
+trigger_count = f_get_trigger_count(htf_changed, cond_buy, cond_sell)
+
+if i_show_trigger_count
+    round_unit = syminfo.mintick * 10
+
+    if cond_buy
+        roundedPrice = math.ceil(high / round_unit) * round_unit
+        label.new(bar_index, p_btm - util.toPrice(margin_top2), str.tostring(trigger_count), yloc=yloc.price, size=size.normal, color=c_none, textcolor=c_buy, style=label.style_label_up, tooltip=str.tostring(roundedPrice))
+
+    if cond_sell
+        roundedPrice = math.floor(low / round_unit) * round_unit
+        label.new(bar_index, p_top + util.toPrice(margin_top2), str.tostring(trigger_count), yloc=yloc.price, size=size.normal, color=c_none, textcolor=c_sell, style=label.style_label_down, tooltip=str.tostring(roundedPrice))
+
+if cond_buy or cond_sell
+    alert_method = cond_buy ? 'Buy' : 'Sell'
+    alert_message = syminfo.ticker + ': ' + alert_method
+
+    alert(alert_message, alert.freq_once_per_bar_close)
+
+///////////////////////	
+// Information table //	
+var info_table = table.new(position.top_right, 2, 4, color.white, color.black, 2, color.blue, 1)
+
+table.merge_cells(info_table, 0, 0, 1, 0)
+
+if barstate.isfirst	
+    if i_show_info_table	
+        table.cell(info_table, 0, 0, i_mode, text_halign=text.align_center)	
+        table.cell(info_table, 0, 1, 'Times', text_halign=text.align_left)	
+        table.cell(info_table, 1, 1, str.tostring(i_averaged_times))	
+        table.cell(info_table, 0, 2, 'Source', text_halign=text.align_left)	
+        table.cell(info_table, 1, 2, i_close_type)	
+    else	
+        table.delete(info_table)
