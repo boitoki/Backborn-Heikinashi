@@ -1,1 +1,1 @@
-# 煮込み平均足
+# Cloak & Dagger Heikin-ashi
