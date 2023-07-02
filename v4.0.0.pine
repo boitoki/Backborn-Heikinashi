@@ -1,0 +1,603 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © boitoki
+
+//@version=5
+indicator("Cloak & Dagger Heikin-ashi", "CD_HA", overlay=false, scale=scale.right, max_labels_count=500, max_lines_count=500, max_boxes_count=500, max_bars_back=10)
+
+import boitoki/AwesomeColor/8 as ac
+import boitoki/Heikinashi/6 as heikinashi
+import boitoki/ma_function/4 as ma
+import boitoki/Utilities/9 as util
+import boitoki/CurrentlyPositionIndicator/5 as cp
+
+/////////////
+// Defined //
+var mintick                     = syminfo.mintick
+var pips                        = syminfo.mintick * 10
+
+var icon_bull                   = '🐂'
+var icon_bear                   = '🐻'
+
+var OPTION_COLOR_X              = 'Custom'
+var OPTION_MODE_STANDARD        = 'Standard heikin-ashi'
+var OPTION_MODE_CD              = 'Cloak & Dagger'
+var OPTION_MODE_C               = 'Cloak'
+var OPTION_MODE_D               = 'Dagger'
+
+var OPTION_BORDER_STYLE1        = '──'
+var OPTION_BORDER_STYLE2        = '••••'
+var OPTION_BORDER_STYLE3        = '- - -'
+var OPTION_LABEL_X              = 'None'
+var OPTION_LABEL_1              = 'Buy・Sell'
+var OPTION_LABEL_5              = 'B・S'
+var OPTION_LABEL_2              = 'Long・Short'
+var OPTION_LABEL_3              = 'L・S'
+var OPTION_LABEL_4              = icon_bull + '・' + icon_bear
+var OPTION_ALERT1               = 'Once Per Bar Close'
+var OPTION_ALERT2               = 'Once Per Bar'
+
+var FILTER_INSIDE               = 0
+var FILTER_CLOSE_VS_TB          = 1
+var FILTER_BALANCE              = 2
+var FILTER_HOPEN2_VS_HCLOSE     = 3
+var FILTER_CLOSE_VS_HL          = 4
+var FILTER_TINY_AND_UNBALANCE   = 5
+var FILTER_ID_AND_GO            = 6
+
+var COLOR_NONE                  = color.new(#000000, 100)
+
+var GP_DEV                      = 'Development & Testing'
+
+var i_show_flag                 = false
+
+///////////////
+// Functions //
+f_color (_package, _color, _costomColor = color.gray) =>
+    switch _package
+        OPTION_COLOR_X  => _costomColor
+        => ac.package(_package, _color)
+
+f_trigger_text_color (_package_name) =>
+    switch _package_name
+        'monokai'       => [ac.monokai('black'), ac.monokai('white')]
+        'monokaipro'    => [ac.monokaipro('black'), ac.monokaipro('white')]
+        => [ac.panda('white'), ac.panda('white')]
+
+f_border_style (_style) =>
+    switch _style
+        OPTION_BORDER_STYLE1 => line.style_solid
+        OPTION_BORDER_STYLE2 => line.style_dotted
+        OPTION_BORDER_STYLE3 => line.style_dashed
+        => _style
+
+f_trading_method (is_buy) => is_buy ? 'Buy' : 'Sell'
+
+f_range (h, l) => math.abs(h - l)
+
+f_ratio (a, b) => a / b * 100
+
+f_cp_doji (_p = 0.01) => math.abs(open - close) <= (high - low) * _p
+
+f_cp_insidebar (h = high, l = low, _t = 1) => t = math.max(_t, 1), h[t-1] <= h[t] and l[t-1] >= l[t]
+
+f_cp_body_id (t, b, t1, b1) => t < t1 and b > b1
+
+f_cp_id_by (_top, _bot, _by = 1) => 
+    c_top = array.get(_top, 0)
+    c_bot = array.get(_bot, 0)
+
+    t_top = array.get(_top, _by)
+    t_bot = array.get(_bot, _by)
+
+    c_top < t_top and c_bot > t_bot
+
+f_cp_id_for (h_, l_, _t = 1, _top, _bot) =>
+    result = false
+
+    for i = 1 to _t
+        t = array.get(_top, i)
+        b = array.get(_bot, i)
+        if h_ < t and l_ > b
+            result := true
+            break
+
+    result
+
+f_cp_id_for2 (t, b, _t = 1, _top, _bot, _high, _low) =>
+    result = false
+
+    h = array.get(_high, 0)
+    l = array.get(_low, 0)
+
+    for i = 1 to math.min(_t, 10)
+        that_t = array.get(_top, i)
+        that_b = array.get(_bot, i)
+        that_h = array.get(_high, i)
+        that_l = array.get(_low, i)
+        // 昔のHL / 今のHL
+        r = f_ratio(f_range(that_h, that_l), f_range(h, l))
+
+        if (t < that_t and b > that_b) and (r > 90)
+            result := true
+            break
+
+    result
+
+f_cp_range_contraction (a, b, a1, b1) => a1 > a and b1 < b
+
+f_flag (_show, string _text, float _number, int _dir=1, _color=color.purple) =>
+    if _show
+        yloc    = _dir == 1 ? yloc.belowbar         : yloc.abovebar
+        style   = _dir == 1 ? label.style_label_up  : label.style_label_down
+        p = (not na(_number)) and _number != 0.0 ? str.tostring(_number, format.mintick) : ''
+
+        label.new(bar_index, na, _text + p, yloc=yloc, color=_color, style=style, size=size.small)
+
+// 前足が下向き: H_Close が H_Openの2期間平均より下なら、bartype[1] を引き継ぐ
+// 前足が上向き: H_Close が H_Openの2期間平均より上なら、bartype[1] を引き継ぐ
+f_bartype_filter_1 (bt, bt1, _c, _avg, _use = false) =>
+    cond1 = bt ==  1 and bt1 == -1 and _c < _avg
+    cond2 = bt == -1 and bt1 ==  1 and _c > _avg
+
+    _use and (cond1 or cond2)
+
+f_bartype_filter_2 (bt, bt1, _c, _avg, _use = false) =>
+    cond1 = bt ==  1 and bt1 == -1 and _c < _avg // [0]陽線 [1]陰線 終値強い
+    cond2 = bt == -1 and bt1 ==  1 and _c > _avg // [0]陰線 [1]陽線 終値弱い
+    
+    _use and (cond1 or cond2)
+
+f_is_changed_bar (bt, bt1) => bt != bt1
+
+is_danger_zone = (hour == 16)
+
+//     -- High
+//  │
+// ┌┴┐ -- Top
+// │ │
+// └┬┘ -- Bottom
+//  │ 
+//     -- Low
+//
+f_bartype (_o, _h, _l, _c, _arr_top, _arr_bot, _arr_high, _arr_low, _is_insidebar, _is_tinybar, _use_filter, _show_flag) =>
+    var is_keep_inside = false
+    var float keep_inside_top = na
+    var float keep_inside_bot = na
+
+    bt      = _c >= _o ? 1 : -1
+    btt     = bt
+
+    up      = array.get(_arr_high, 0) - array.get(_arr_high, 1)
+    dn      = array.get(_arr_low, 0) - array.get(_arr_low, 1)
+
+    t       = math.max(_o, _c) // top
+    b       = math.min(_o, _c) // btm
+    h       = math.max(_h, t)
+    l       = math.min(_l, b)
+    h_t     = math.max(math.max(h - t, 0), mintick) // high - top
+    b_l     = math.max(math.max(b - l, 0), mintick) // btm - low
+    height  = t - b
+    r1      = h_t / b_l
+    r2      = b_l / h_t
+    r3      = h_t / (h_t + b_l)
+    r4      = b_l / (h_t + b_l)
+    LV1     = 1.618
+    LV2     = 2.618
+
+    is_up       = up > 0 and dn > 0
+    is_dn       = dn < 0 and up < 0
+    is_all_up   = h > h[1] and l > l[1] and t > t[1] and b > b[1] and close >= close[1] and _h > _h[1] and _l > _l[1]
+    is_all_dn   = h < h[1] and l < l[1] and t < t[1] and b < b[1] and close <= close[1] and _h < _h[1] and _l < _l[1]
+
+    is_rc = (f_cp_range_contraction(t, b, t[1], b[1]) and f_cp_range_contraction(t[1], b[1], t[2], b[2]))
+
+    // インサイドバーなら前の bartype を引き継ぐ
+    if _is_insidebar
+        bt := bt[1]
+    else if _is_tinybar
+        // 極小足なら前の bartype を引き継ぐ
+        bt := bt[1]
+
+        // 現在が極小足でも、前の足が極小足ではない場合
+        if (not _is_tinybar[1]) and f_is_changed_bar(btt, btt[1])
+            // 1. 前足が陰線で、上髭が長いなら  1
+            // 2. 前足が陽線で、下髭が長いなら -1
+            if bt[1] == -1 and ((h_t / h_t[1] > LV1 and r1 > LV1))
+                bt := 1
+            if bt[1] == 1  and ((b_l / b_l[1] > LV1 and r2 > LV1))
+                bt := -1
+
+    // インサイドチェック
+    if is_keep_inside
+        if array.get(_arr_top, 0) > keep_inside_top
+            f_flag(_show_flag, 'x', 0, bt, color.red)
+            bt := 1
+            is_keep_inside := false
+
+        else if array.get(_arr_bot, 0) < keep_inside_bot
+            f_flag(_show_flag, 'x', 0, bt, color.yellow)
+            bt := -1
+            is_keep_inside := false
+        else
+            bt := bt[1]
+            // line.new(bar_index - 1, keep_inside_top, bar_index, keep_inside_top)
+            // line.new(bar_index - 1, keep_inside_bot, bar_index, keep_inside_bot)
+
+    if f_cp_id_by(_arr_top, _arr_bot, 1) and is_keep_inside == false
+        f_flag(_show_flag, 'I', 0, bt)
+        bt := bt[1]
+        keep_inside_top := array.get(_arr_top, 1)
+        keep_inside_bot := array.get(_arr_bot, 1)
+        is_keep_inside := true
+        // line.new(bar_index - 1, keep_inside_top, bar_index, keep_inside_top)
+        // line.new(bar_index - 1, keep_inside_bot, bar_index, keep_inside_bot)
+    
+    if f_cp_id_by(_arr_high, _arr_low, 1) and f_is_changed_bar(bt, bt[1])
+        bt := bt[1]
+        f_flag(_show_flag, 'IHL', 0, bt)
+
+
+    // 終値が, H_Top と H_Bottom の間にあるなら、bartype[1] を引き継ぐ
+    if array.get(_use_filter, FILTER_CLOSE_VS_TB)
+        if f_is_changed_bar(bt, bt[1]) and (close < t and close > b)
+            bt := bt[1]
+            f_flag(_show_flag, 'F4', 0, bt)
+
+    // 上髭と下髭の比率が同程度なら、bartype[1] を引き継ぐ
+    if array.get(_use_filter, FILTER_BALANCE)
+        if f_is_changed_bar(bt, bt[1]) and ((r3 <= 0.6 and r3 >= 0.4) or (r4 <= 0.6 and r4 >= 0.4))
+            bt := bt[1]
+            f_flag(_show_flag, 'F5', 0, bt)
+
+    // H_Openの過去2期間平均と、H_Closeを比較
+    if array.get(_use_filter, FILTER_HOPEN2_VS_HCLOSE)
+        if f_bartype_filter_1(bt, bt[1], _c, math.avg(_o[1], _o[2]), true)
+            bt := bt[1]
+            f_flag(_show_flag, 'F1', 0, bt)
+
+    // 終値とH_HighとH_Lowの平均を比較
+    // if array.get(_use_filter, FILTER_CLOSE_VS_HL)
+    //     if f_bartype_filter_2(bt, bt[1], close, math.avg(h, l), true)
+    //         f_flag(_show_flag, 'F2', math.avg(_h, _l), bt)
+    //         bt := bt[1]
+
+    [bt, btt]
+
+///////////////
+// Variables //
+var bt_filters = array.new<bool>()
+
+////////////
+// Inputs //
+
+i_type                      = input.string('Heikin-Ashi', 'Display', options=['Heikin-Ashi', 'Candles', 'Barcolor', 'None'], group='General')
+i_show_candle               = i_type == 'Candles'
+i_show_heikinashi           = i_type == 'Heikin-Ashi'
+i_show_barcolor             = i_type == 'Barcolor'
+i_mode                      = input.string(OPTION_MODE_CD, 'Mode', options=[OPTION_MODE_CD, OPTION_MODE_C, OPTION_MODE_D, OPTION_MODE_STANDARD], group='General')
+i_candle_close              = input.string('Signal only', 'Actual Close Level', options=['Always', 'Signal only', 'Never'], group="General")
+i_alert_trigger             = input.string(OPTION_ALERT1, 'Alert trigger', options=[OPTION_ALERT1, OPTION_ALERT2], group='General')
+
+i_show_triggers             = input.bool(true, "Flip", group='Flags', inline='trigger_flip')
+i_trigger_label             = input.string(OPTION_LABEL_5, '', options=[OPTION_LABEL_X, OPTION_LABEL_1, OPTION_LABEL_5, OPTION_LABEL_2, OPTION_LABEL_3, OPTION_LABEL_4], group='Flags', inline='trigger_flip')
+i_show_range_contraction    = input.bool(false, 'Range contraction ×', group='Flags') and i_show_triggers
+i_show_qqe                  = input.bool(false, 'QQE triggers', group='Flags') and i_show_triggers
+
+i_show_indicator            = input.bool(true, 'Indicator', group='Position indicator')
+i_show_exections            = input.bool(false, 'History', group='Position indicator')
+
+i_ma1_displayed             = input.bool(false, 'MA1', inline='ma1', group='MA')
+i_ma1_source                = input.string('open', '', inline='ma1', group='MA', options=['open', 'close', 'os2', 'hlc3', 'ohlc4'])
+i_ma1_period                = input.int(30, '', minval=1, inline='ma1', group='MA')
+i_ma1_type                  = input.string('EMA', '', options=['ALMA', 'AMA', 'DEMA', 'EMA', 'HMA', 'KAMA', 'LSMA', 'MAV', 'RMA', 'SMA', 'SWMA', 'TEMA', 'TMA', 'VWMA', 'WMA', 'ZLEMA'], inline='ma1', group='MA')
+i_ma1_style                 = input.string(OPTION_BORDER_STYLE1, '', options=[OPTION_BORDER_STYLE1, OPTION_BORDER_STYLE2, OPTION_BORDER_STYLE3], inline='ma1', group='MA')
+i_ma2_displayed             = input.bool(false, 'MA2', inline='ma2', group='MA')
+i_ma2_source                = input.string('open', '', inline='ma2', group='MA', options=['open', 'close', 'os2', 'hlc3', 'ohlc4'])
+i_ma2_period                = input.int(200, '', minval=1, inline='ma2', group='MA')
+i_ma2_type                  = input.string('EMA', '', options=['ALMA', 'AMA', 'DEMA', 'EMA', 'HMA', 'KAMA', 'LSMA', 'MAV', 'RMA', 'SMA', 'SWMA', 'TEMA', 'TMA', 'VWMA', 'WMA', 'ZLEMA'], inline='ma2', group='MA')
+i_ma2_style                 = input.string(OPTION_BORDER_STYLE2, '', options=[OPTION_BORDER_STYLE1, OPTION_BORDER_STYLE2, OPTION_BORDER_STYLE3], inline='ma2', group='MA')
+
+i_hollow                    = input.bool(true, 'Hollow candle', group='options')
+i_color                     = input.string('TradingView', 'Color theme', options=[OPTION_COLOR_X, 'TradingView', 'monokai', 'monokaipro', 'panda', 'Gruvbox', 'Spacemacs_light', 'Spacemacs_dark', 'Guardians', 'st3', 'st4'], group='options')
+i_color_1                   = input.color(color.green   , 'Posi color'     , group='custom color')
+i_color_2                   = input.color(color.red     , 'Nega color'     , group='custom color')
+i_color_7                   = input.color(color.blue    , 'Buy color'      , group='custom color')
+i_color_8                   = input.color(color.red     , 'Sell color'     , group='custom color')
+i_color_4                   = input.color(color.orange  , 'TP color'       , group='custom color')
+i_color_5                   = input.color(color.purple  , 'SL color'       , group='custom color')
+i_color_6                   = input.color(color.gray    , 'Default color'  , group='custom color')
+i_color_3                   = input.color(color.aqua    , 'MA color'       , group='custom color')
+
+var color_bull              = f_color(i_color, 'green'  , i_color_1)
+var color_bear              = f_color(i_color, 'red'    , i_color_2)
+var color_ma                = f_color(i_color, 'blue'   , i_color_3)
+var color_sl                = f_color(i_color, 'purple' , i_color_5)
+var color_tp                = f_color(i_color, 'orange' , i_color_4)
+var color_buy               = f_color(i_color, 'blue'   , i_color_7)
+var color_sell              = f_color(i_color, 'red'    , i_color_8)
+var color_gray              = f_color(i_color, 'gray'   , i_color_6)
+var color_black             = f_color(i_color, 'black'  , color.black)
+var color_bar               = COLOR_NONE
+var cpi_colors              = array.from(color_buy, color_sell, color_sl, color_tp, color_gray)
+
+//i_show_flag                := input.bool(false, 'Flag', group=GP_DEV)
+
+i_averaged_times            = 1
+i_close_type                = 'ohlc4'
+
+i_use_filter_1              = true
+i_use_filter_2              = true
+i_use_filter_3              = true
+i_use_filter_4              = true
+i_use_filter_5              = true
+i_use_filter_6              = true
+i_use_filter_7              = true
+
+// i_use_filter_1 := input.bool(false, 'B: Inside')
+// i_use_filter_5 := input.bool(false, 'B: Close vs HL')
+// i_use_filter_4 := input.bool(false, 'B: H_Open2 VS H_Close')
+// i_use_filter_3 := input.bool(false, 'B: Unbalance shadow')
+// i_use_filter_2 := input.bool(false, 'B: Close vs TB')
+// i_use_filter_7 := input.bool(false, 'F: Inside2 and Go')
+// i_use_filter_6 := input.bool(false, 'F: Tiny and Unbalance')
+
+//i_averaged_times           := input.int(1, 'Averaged by (times)', minval=1, maxval=10, group="Development & Testing")
+//i_close_type               := input.string('ohlc4', 'Close calculated by', options=['ohlc4', 'ohlc4-s2', 'ohlc4-s3', 'ohlc4-s4', 'hlc3', 'oc2', 'hl2', 'close'], group="Development & Testing")
+
+// Setting param by mode
+if i_mode == OPTION_MODE_CD
+    i_averaged_times       := 3
+    i_close_type           := 'oc2'
+    i_use_filter_1         := true
+    i_use_filter_2         := true
+    i_use_filter_3         := true
+    i_use_filter_4         := true
+    i_use_filter_5         := true
+    i_use_filter_6         := true
+    i_use_filter_7         := true
+else if i_mode == OPTION_MODE_D
+    i_averaged_times       := 3
+    i_close_type           := 'ohlc4'
+    i_use_filter_1         := true
+    i_use_filter_2         := true
+    i_use_filter_3         := true
+    i_use_filter_4         := true
+    i_use_filter_5         := false
+    i_use_filter_6         := false
+    i_use_filter_7         := false
+else if i_mode == OPTION_MODE_C
+    i_averaged_times       := 5
+    i_close_type           := 'oc2'
+    i_use_filter_1         := true
+    i_use_filter_2         := true
+    i_use_filter_3         := true
+    i_use_filter_4         := true
+    i_use_filter_5         := false
+    i_use_filter_6         := false
+    i_use_filter_7         := false
+
+if barstate.isfirst
+    array.clear(bt_filters)
+    array.push(bt_filters, i_use_filter_1) // FILTER_INSIDE
+    array.push(bt_filters, i_use_filter_2) // FILTER_CLOSE_VS_TB
+    array.push(bt_filters, i_use_filter_3) // FILTER_BALANCE
+    array.push(bt_filters, i_use_filter_4) // FILTER_HOPEN2_VS_HCLOSE
+    array.push(bt_filters, i_use_filter_5) // FILTER_CLOSE_VS_HL
+    array.push(bt_filters, i_use_filter_6) // FILTER_TINY_AND_UNBALANCE
+    array.push(bt_filters, i_use_filter_7) // FILTER_ID_AND_GO
+
+//////////
+// Calc //
+htf_changed                 = ta.change(time(util.auto_htf()))
+
+[hopen, _, _, hclose]       = heikinashi.calcFor_v1(open, high, low, close, i_close_type, i_averaged_times)
+htop                        = math.max(hopen, hclose)
+hbtm                        = math.min(hopen, hclose)
+hhigh                       = math.max(high, htop)
+hlow                        = math.min(low , hbtm)
+hoc2                        = math.avg(hopen, hclose)
+hchg                        = ta.sma(math.abs(hoc2[1] - hoc2[2]), 16)
+
+f_ma_source (_name) =>
+    switch _name
+        'open'  => hopen
+        'close' => hclose
+        'oc2'   => math.avg(hopen, hclose)
+        'hlc3'  => math.avg(hclose, hhigh, hlow)
+        'ohlc4' => math.avg(hopen, hclose, hhigh, hlow)
+        => hopen
+
+ma1                         = ma.calc(i_ma1_type, f_ma_source(i_ma1_source), i_ma1_period)
+ma2                         = ma.calc(i_ma2_type, f_ma_source(i_ma2_source), i_ma2_period)
+
+hl_pips                     = util.to_pips(math.abs(high - low))
+oc_pips                     = util.to_pips(math.abs(hopen - hclose))
+
+// Conditions
+is_insidebar                = f_cp_insidebar(hhigh, hlow)
+is_tinybar                  = oc_pips < math.round(ta.stdev(oc_pips, 100) / 3) // 15min: 3pips
+is_super_tinybar            = oc_pips < math.round(ta.stdev(oc_pips, 100) / 5) // 15min: 3pips
+is_id_body                  = f_cp_body_id(htop, hbtm, htop[1], hbtm[1])
+// is_largebar                 = hl_pips > math.round(ta.stdev(hl_pips, 100) * 3) // 15min: 30pips
+
+top_list                    = array.from(htop[0] , htop[1] , htop[2] , htop[3] , htop[4] , htop[5]  )
+btm_list                    = array.from(hbtm[0] , hbtm[1] , hbtm[2] , hbtm[3] , hbtm[4] , hbtm[5]  )
+low_list                    = array.from(hlow[0] , hlow[1] , hlow[2] , hlow[3] , hlow[4] , hlow[5]  )
+high_list                   = array.from(hhigh[0], hhigh[1], hhigh[2], hhigh[3], hhigh[4], hhigh[5] )
+[bartype, bartype_true]     = f_bartype(hopen, high, low, hclose, top_list, btm_list, high_list, low_list, is_insidebar, is_tinybar, bt_filters, i_show_flag)
+
+// Triggers
+cond_buy                    = ta.change(bartype) > 0
+cond_sell                   = ta.change(bartype) < 0
+
+var bar_count               = 0, bar_count := bartype != bartype[1] ? 0 : bar_count + 1
+var rc_count                = 0, rc_count  := bar_count == 0 ? 0 : rc_count
+
+// Range contraction
+cond_buy_rc                 = is_id_body and is_super_tinybar and bartype ==  1 and bar_count > 3
+cond_sell_rc                = is_id_body and is_super_tinybar and bartype == -1 and bar_count > 3
+
+if (bar_count > 0) and (cond_buy_rc or cond_sell_rc)
+    rc_count += 1
+
+
+/////////
+// QQE //
+oc2                         = math.avg(open, close)
+[osc, vosc, QLine]          = util.qqe_func(oc2, 3, 6, 5, 5)
+
+var qqeTrend                = 0
+qqeLong                     = ta.crossover (vosc, 0) and (not cond_buy)  and bartype ==  1
+qqeShort                    = ta.crossunder(vosc, 0) and (not cond_sell) and bartype == -1
+qqeLongTrend                = qqeLong  and qqeTrend !=  1
+qqeShortTrend               = qqeShort and qqeTrend != -1
+qqeTrend                   := qqeLong ? 1 : qqeShort ? -1 : qqeTrend[1]
+
+/////////////////
+// Plot colors //
+color_bar                  := bartype == 1 ? color_bull : color_bear
+
+if i_mode == OPTION_MODE_STANDARD
+    color_bar              := hclose > hopen ? color_bull : color_bear
+
+c_border                    = color_bar
+c_body                      = color_bar
+c_close                     = COLOR_NONE
+c_close := if i_show_heikinashi 
+    switch i_candle_close
+        'Always'            => color_bar
+        'Signal only'       => (cond_buy or cond_sell or (i_show_qqe and (qqeLong or qqeShort))) ? color_bar : COLOR_NONE
+        'Never'             => COLOR_NONE 
+
+if i_hollow
+    if bartype == 1
+        c_body             := COLOR_NONE
+    else if i_mode == OPTION_MODE_STANDARD and (hclose > hopen)
+        c_body             := COLOR_NONE
+
+//////////////
+// Plotting //
+[plot_open, plot_close]     = if i_show_heikinashi
+    [hopen, hclose]
+else if i_show_candle
+    [open, close]
+else
+    [na, na]
+
+plot_high                   = math.max(plot_open, plot_close, high)
+plot_low                    = math.min(plot_open, plot_close, low)
+
+plotcandle(plot_open, plot_high, plot_low, plot_close, 'Heikin-ashi', color=c_body, wickcolor=c_border, bordercolor=c_border)
+plotcandle(close, close, close, close, 'Close level', color=COLOR_NONE, wickcolor=COLOR_NONE, bordercolor=c_close)
+
+ma_offset = 0
+
+// MA
+plot(i_ma1_displayed and i_ma1_style == OPTION_BORDER_STYLE1 ? ma1[ma_offset] : na, 'MA1', color=color_ma, linewidth=1)
+plot(i_ma2_displayed and i_ma2_style == OPTION_BORDER_STYLE1 ? ma2[ma_offset] : na, 'MA2', color=color_ma, linewidth=1)
+
+if i_ma1_displayed and i_ma1_style != OPTION_BORDER_STYLE1
+    line.new(bar_index, ma1[ma_offset], bar_index-1, ma1[ma_offset+1], style=f_border_style(i_ma1_style), color=color_ma)
+
+if i_ma2_displayed and i_ma2_style != OPTION_BORDER_STYLE1
+    line.new(bar_index, ma2[ma_offset], bar_index-1, ma2[ma_offset+1], style=f_border_style(i_ma2_style), color=color_ma)
+
+// Bar colors
+barcolor(i_show_barcolor ? c_body : na)
+
+//////////////////
+// Entry Levels //
+var entry_index         = 0
+var entry_side          = 0
+var entry_price         = 0.0
+var entry_entered       = false
+var entry_range_high    = 0.0
+var entry_range_low     = 0.0
+var entry_lc            = 0.0
+var scale_lines         = array.new<line>()
+var scale_x             = 0
+cond_sell_index         = math.max(nz(ta.barssince(cond_sell), 1), 1)
+cond_buy_index          = math.max(nz(ta.barssince(cond_buy ), 1), 1)
+lowest_index            = math.abs(ta.lowestbars (plot_low , cond_sell_index))
+highest_index           = math.abs(ta.highestbars(plot_high, cond_buy_index ))
+
+if i_show_exections
+    chg_type = syminfo.type == 'forex' ? 'pips' : 'price'
+    cp.history(entry_index, entry_price, entry_lc, entry_range_high, entry_range_low, entry_side, entry_entered, cpi_colors, (cond_buy or cond_sell), chg_type)
+
+if cond_buy
+    scale_x := bar_index - lowest_index
+    t = math.max(util.round(util.to_pips(hchg)), 0.5)
+    p = util.rounded_price(hhigh, t * 10, 'ceil', true, 1)
+    entry_price := p
+    entry_index := bar_index
+    entry_side := 1
+    entry_entered := false
+    entry_lc := hlow
+    entry_range_high := p
+    entry_range_low := p
+
+else if cond_sell
+    scale_x := bar_index - highest_index
+    t = math.max(util.round(util.to_pips(hchg)), 0.5)
+    p = util.rounded_price(hlow, t * 10, 'floor', false, 1)
+    entry_price := p
+    entry_index := bar_index
+    entry_side := -1
+    entry_entered := false
+    entry_lc := hhigh
+    entry_range_high := p
+    entry_range_low := p
+
+else
+    entry_range_high := math.max(entry_range_high, high )
+    entry_range_low  := math.min(entry_range_low , low  )
+
+    if (entry_side == 1 and high > entry_price) or (entry_side == -1 and low < entry_price)
+        entry_entered := true
+
+if i_show_indicator
+    cp.run(entry_index, entry_price, entry_lc, entry_range_high, entry_range_low, entry_side, entry_entered, cpi_colors)
+
+//////////////
+// Triggers //
+margin_top1                 = math.round(ta.stdev(oc_pips, 1000) / 2.00)
+margin_top2                 = math.round(ta.stdev(oc_pips, 1000) / 0.50)
+p_top                       = hhigh + util.to_price(margin_top1)
+p_btm                       = hlow  - util.to_price(margin_top1)
+[textcolor1, textcolor2]    = f_trigger_text_color(i_color)
+rc_show_num                 = 3
+
+plotshape(i_show_range_contraction and cond_buy_rc  and (not cond_buy_rc[1] ) and rc_count <= rc_show_num ? p_top : na, 'Range Contraction', style=shape.xcross, color=color.from_gradient(80, 0, 100, color_black, color_buy), location=location.absolute, size=size.tiny, editable=false)
+plotshape(i_show_range_contraction and cond_sell_rc and (not cond_sell_rc[1]) and rc_count <= rc_show_num ? p_btm : na, 'Range Contraction', style=shape.xcross, color=color.from_gradient(80, 0, 100, color_black, color_sell), location=location.absolute, size=size.tiny, editable=false)
+
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_X and cond_buy  ? p_btm : na, 'Buy' , text='', textcolor=textcolor1, color=color_buy, style=shape.labelup, location=location.absolute, size=size.tiny, editable=false)
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_X and cond_sell ? p_top : na, 'Sell', text='', textcolor=textcolor2, color=color_sell, style=shape.labeldown, location=location.absolute, size=size.tiny, editable=false)
+
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_1 and cond_buy  ? p_btm : na, 'Buy' , text='Buy', textcolor=textcolor1, color=color_buy, style=shape.labelup, location=location.absolute, size=size.tiny, editable=false)
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_1 and cond_sell ? p_top : na, 'Sell', text='Sell', textcolor=textcolor2, color=color_sell, style=shape.labeldown, location=location.absolute, size=size.tiny, editable=false)
+
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_5 and cond_buy  ? p_btm : na, 'Buy' , text='B', textcolor=textcolor1, color=color_buy, style=shape.labelup, location=location.absolute, size=size.tiny, editable=false)
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_5 and cond_sell ? p_top : na, 'Sell', text='S', textcolor=textcolor2, color=color_sell, style=shape.labeldown, location=location.absolute, size=size.tiny, editable=false)
+
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_2 and cond_buy  ? p_btm : na, 'Buy' , text='Long', textcolor=textcolor1, color=color_buy, style=shape.labelup, location=location.absolute, size=size.tiny, editable=false)
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_2 and cond_sell ? p_top : na, 'Sell', text='Short', textcolor=textcolor2, color=color_sell, style=shape.labeldown, location=location.absolute, size=size.tiny, editable=false)
+
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_3 and cond_buy  ? p_btm : na, 'Buy' , text='L', textcolor=textcolor1, color=color_buy, style=shape.labelup, location=location.absolute, size=size.tiny, editable=false)
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_3 and cond_sell ? p_top : na, 'Sell', text='S', textcolor=textcolor2, color=color_sell, style=shape.labeldown, location=location.absolute, size=size.tiny, editable=false)
+
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_4 and cond_buy  ? p_btm : na, 'Buy' , text=icon_bull, textcolor=textcolor1, color=color_buy, style=shape.labelup, location=location.absolute, size=size.tiny, editable=false)
+plotshape(i_show_triggers and i_trigger_label == OPTION_LABEL_4 and cond_sell ? p_top : na, 'Sell', text=icon_bear, textcolor=textcolor2, color=color_sell, style=shape.labeldown, location=location.absolute, size=size.tiny, editable=false)
+
+plotshape(i_show_qqe and qqeLong  ? p_btm : na, '' , color=color_buy, style=shape.labelup, location=location.absolute, size=size.tiny)
+plotshape(i_show_qqe and qqeShort ? p_top : na, '', color=color_sell, style=shape.labeldown, location=location.absolute, size=size.tiny)
+
+///////////
+// Alert //
+if cond_buy or cond_sell
+    alert_message  = syminfo.ticker + ': ' + f_trading_method(cond_buy) + ' @' + str.tostring(entry_price)
+
+    if i_alert_trigger == OPTION_ALERT1
+        alert(alert_message, alert.freq_once_per_bar_close)
+    else
+        alert(alert_message, alert.freq_once_per_bar)
